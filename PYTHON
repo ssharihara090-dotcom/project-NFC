@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+import board
+import busio
+import time
+import sys
+import cv2
+import numpy as np
+import os
+from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
+import adafruit_ssd1306
+
+# Common addresses
+PN532_ADDRESSES = [0x24, 0x48]
+OLED_ADDRESSES = [0x3C, 0x3D]
+
+class NFC_Camera_System:
+    def __init__(self):
+        self.i2c = busio.I2C(board.SCL, board.SDA)
+        self.oled = None
+        self.pn532 = None
+        self.camera = None
+        self.face_cascade = None
+        
+        self.scan_count = 0
+        self.last_uid = None
+        self.current_person = None
+        
+        self.setup_components()
+        
+    def setup_components(self):
+        """Initialize all components"""
+        print("🚀 Initializing System Components...")
+        
+        # Setup OLED
+        self.setup_oled()
+        
+        # Setup NFC
+        self.setup_nfc()
+        
+        # Setup Camera
+        self.setup_camera()
+        
+        # Setup Face Detection
+        self.setup_face_detection()
+        
+        print("✅ All components initialized successfully!")
+        
+    def setup_oled(self):
+        """Initialize OLED display"""
+        print("🔍 Setting up OLED display...")
+        
+        for addr in OLED_ADDRESSES:
+            try:
+                self.oled = adafruit_ssd1306.SSD1306_I2C(128, 64, self.i2c, addr=addr)
+                print(f"✅ OLED found at 0x{addr:02X}")
+                self.display_message(["SYSTEM BOOT", "Initializing...", "Please wait"], 2)
+                return
+            except Exception as e:
+                print(f"❌ OLED not at 0x{addr:02X}: {e}")
+        
+        raise Exception("No OLED display found")
+    
+    def setup_nfc(self):
+        """Initialize NFC reader"""
+        print("🔍 Setting up NFC reader...")
+        self.display_message(["Initializing", "NFC Reader..."])
+        
+        # Scan for I2C devices
+        while not self.i2c.try_lock():
+            pass
+        devices = self.i2c.scan()
+        self.i2c.unlock()
+        
+        print(f"Found I2C devices: {[hex(addr) for addr in devices]}")
+        
+        for address in PN532_ADDRESSES:
+            try:
+                if address in devices:
+                    from adafruit_pn532.i2c import PN532_I2C
+                    self.pn532 = PN532_I2C(self.i2c, address=address, debug=False)
+                    self.pn532.SAM_configuration()
+                    
+                    ic, ver, rev, support = self.pn532.firmware_version
+                    print(f"✅ NFC found at 0x{address:02X}")
+                    
+                    self.display_message(["NFC READY", f"FW: {ver}.{rev}", "Scanning..."], 2)
+                    return
+                    
+            except Exception as e:
+                print(f"❌ NFC not at 0x{address:02X}: {e}")
+        
+        raise Exception("No NFC module found")
+    
+    def setup_camera(self):
+        """Initialize camera"""
+        print("📷 Setting up camera...")
+        self.display_message(["Initializing", "Camera..."])
+        
+        try:
+            self.camera = cv2.VideoCapture(0)
+            if not self.camera.isOpened():
+                raise Exception("Cannot open camera")
+            
+            # Test camera
+            ret, frame = self.camera.read()
+            if not ret:
+                raise Exception("Cannot read from camera")
+                
+            print("✅ Camera initialized successfully")
+            self.display_message(["CAMERA READY", "Test successful"], 2)
+            
+        except Exception as e:
+            print(f"❌ Camera error: {e}")
+            self.display_message(["CAMERA ERROR", "Check connection"], 3)
+            self.camera = None
+    
+    def setup_face_detection(self):
+        """Setup face detection"""
+        print("👤 Setting up face detection...")
+        
+        try:
+            self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            if self.face_cascade.empty():
+                raise Exception("Could not load face cascade")
+                
+            print("✅ Face detection ready")
+            
+        except Exception as e:
+            print(f"❌ Face detection error: {e}")
+            self.face_cascade = None
+    
+    def display_message(self, lines, duration=0):
+        """Display multiple lines on OLED"""
+        if not self.oled:
+            return
+            
+        image = Image.new("1", (128, 64))
+        draw = ImageDraw.Draw(image)
+        
+        try:
+            font = ImageFont.load_default()
+        except:
+            font = None
+        
+        self.oled.fill(0)
+        
+        y_pos = 0
+        for line in lines:
+            if font:
+                draw.text((0, y_pos), line, font=font, fill=255)
+            else:
+                draw.text((0, y_pos), line, fill=255)
+            y_pos += 10
+        
+        self.oled.image(image)
+        self.oled.show()
+        
+        if duration > 0:
+            time.sleep(duration)
+    
+    def capture_person(self):
+        """Capture person using camera with face detection"""
+        if not self.camera or not self.face_cascade:
+            self.display_message(["CAMERA UNAVAIL", "Skipping face", "detection"], 3)
+            return "Unknown Person"
+        
+        print("👤 Capturing person with camera...")
+        self.display_message(["LOOK AT CAMERA", "Capturing face...", "Smile! 😊"])
+        
+        faces_detected = 0
+        best_frame = None
+        start_time = time.time()
+        
+        # Capture for 5 seconds or until face is detected
+        while time.time() - start_time < 5:
+            ret, frame = self.camera.read()
+            if not ret:
+                continue
+            
+            # Convert to grayscale for face detection
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            
+            # Detect faces
+            faces = self.face_cascade.detectMultiScale(gray, 1.3, 5)
+            
+            # Display camera feed
+            display_frame = frame.copy()
+            for (x, y, w, h) in faces:
+                cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                cv2.putText(display_frame, f"Faces: {len(faces)}", 
+                          (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            cv2.imshow("Face Detection - Press SPACE to capture", display_frame)
+            
+            # Store frame with most faces
+            if len(faces) > faces_detected:
+                faces_detected = len(faces)
+                best_frame = frame.copy()
+            
+            # Check for key press
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord(' '):  # Space bar to capture
+                if len(faces) > 0:
+                    break
+            elif key == 27:  # ESC to skip
+                cv2.destroyAllWindows()
+                return "Skipped"
+        
+        cv2.destroyAllWindows()
+        
+        if faces_detected > 0:
+            # Save the captured image
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"captured_person_{timestamp}.jpg"
+            cv2.imwrite(filename, best_frame)
+            print(f"✅ Person captured and saved as {filename}")
+            
+            person_id = f"Person_{faces_detected}Faces"
+            self.display_message(["PERSON FOUND!", f"Faces: {faces_detected}", "Processing..."], 2)
+            return person_id
+        else:
+            self.display_message(["NO FACE FOUND", "Using default", "identification"], 2)
+            return "Unknown Person"
+    
+    def scan_nfc_tag(self):
+        """Scan NFC tag"""
+        if not self.pn532:
+            return None
+        
+        try:
+            return self.pn532.read_passive_target(timeout=0.1)
+        except Exception as e:
+            print(f"NFC Read Error: {e}")
+            return None
+    
+    def process_nfc_tag(self, uid):
+        """Process NFC tag and display details"""
+        uid_hex = ''.join([format(byte, '02X') for byte in uid])
+        self.scan_count += 1
+        
+        # Determine tag type
+        tag_types = {
+            4: "MIFARE Mini",
+            7: "MIFARE 1K/4K", 
+            10: "MIFARE DESFire"
+        }
+        tag_type = tag_types.get(len(uid), f"Unknown ({len(uid)}B)")
+        
+        print(f"\n🎉 NFC Tag #{self.scan_count} Detected!")
+        print(f"   UID: {uid_hex}")
+        print(f"   Type: {tag_type}")
+        
+        # Display NFC info on OLED
+        self.display_message([
+            "NFC TAG SCANNED",
+            f"UID: {uid_hex[:12]}",
+            uid_hex[12:] if len(uid_hex) > 12 else "",
+            f"Type: {tag_type}",
+            f"Scan: #{self.scan_count}"
+        ], 3)
+        
+        return uid_hex, tag_type
+    
+    def display_complete_info(self, nfc_uid, tag_type, person_name):
+        """Display complete information on OLED"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        
+        # Format UID for display
+        if len(nfc_uid) > 12:
+            uid_line1 = nfc_uid[:12]
+            uid_line2 = nfc_uid[12:]
+        else:
+            uid_line1 = nfc_uid
+            uid_line2 = ""
+        
+        lines = [
+            "SCAN COMPLETE!",
+            f"Person: {person_name}",
+            f"Tag: {uid_line1}",
+            uid_line2,
+            f"Time: {timestamp}",
+            f"Total: #{self.scan_count}"
+        ]
+        
+        self.display_message(lines, 5)
+        
+        # Print summary
+        print(f"\n📊 SCAN SUMMARY:")
+        print(f"   👤 Person: {person_name}")
+        print(f"   🏷️  NFC Tag: {nfc_uid}")
+        print(f"   📋 Type: {tag_type}")
+        print(f"   ⏰ Time: {timestamp}")
+        print(f"   🔢 Total Scans: {self.scan_count}")
+    
+    def run_system(self):
+        """Main system loop"""
+        print("\n🚀 SYSTEM READY - Starting Main Loop...")
+        print("   Tap NFC tag to scan person")
+        print("   Press Ctrl+C to exit\n")
+        
+        self.display_message([
+            "SYSTEM READY",
+            "Tap NFC Tag",
+            "to scan person",
+            " ",
+            f"Scans: {self.scan_count}",
+            "Ctrl+C to exit"
+        ])
+        
+        try:
+            while True:
+                # Scan for NFC tag
+                uid = self.scan_nfc_tag()
+                
+                if uid is not None:
+                    uid_hex = ''.join([format(byte, '02X') for byte in uid])
+                    
+                    # Only process new tags
+                    if uid_hex != self.last_uid:
+                        print(f"\n🔔 New tag detected: {uid_hex}")
+                        
+                        # Process NFC tag
+                        nfc_uid, tag_type = self.process_nfc_tag(uid)
+                        
+                        # Capture person with camera
+                        print("👤 Starting person capture...")
+                        person_name = self.capture_person()
+                        
+                        # Display complete information
+                        self.display_complete_info(nfc_uid, tag_type, person_name)
+                        
+                        self.last_uid = uid_hex
+                        self.current_person = person_name
+                
+                else:
+                    # Tag removed
+                    if self.last_uid is not None:
+                        print("Tag removed - Ready for next scan")
+                        self.display_message([
+                            "READY FOR NEXT",
+                            "Tap NFC Tag",
+                            "to scan person",
+                            " ",
+                            f"Scans: {self.scan_count}",
+                            "Ctrl+C to exit"
+                        ])
+                        self.last_uid = None
+                
+                time.sleep(0.1)
+                
+        except KeyboardInterrupt:
+            print("\n👋 Shutting down system...")
+            self.display_message(["SYSTEM OFF", "Goodbye! 👋"], 2)
+            self.cleanup()
+        
+        except Exception as e:
+            print(f"❌ System error: {e}")
+            self.display_message(["SYSTEM ERROR", str(e)[:16], "Restart needed"], 5)
+            self.cleanup()
+    
+    def cleanup(self):
+        """Cleanup resources"""
+        if self.camera:
+            self.camera.release()
+        cv2.destroyAllWindows()
+        if self.oled:
+            self.oled.fill(0)
+            self.oled.show()
+
+def main():
+    # Check for OpenCV
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        print("❌ OpenCV not installed. Install with: pip install opencv-python")
+        return
+    
+    try:
+        system = NFC_Camera_System()
+        system.run_system()
+    except Exception as e:
+        print(f"❌ System initialization failed: {e}")
+
+if __name__ == "__main__":
+    main()
